@@ -7,7 +7,7 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE)
 library(knitr)
 library(data.table)
 library(tidyverse)
@@ -18,6 +18,9 @@ library(bio3d)
 library(geometry)
 library(ggplot2)
 library(summarytools)
+library(matrixStats)
+library(ggforce)
+library(gtools)
 ```
 
 ### Background
@@ -44,7 +47,7 @@ knitr::include_graphics("./data/MAX_Nsp1mch_deltaNup132cl10_07_visit_2_SIR_nuc15
 ```
 
 For simulated random data, we can simulate points on a sphere using the `icosa` package:
-```{r }
+```{r echo=TRUE }
 simulated <- data.frame(icosa::rpsphere(131, radius=1.2))
 
 ```
@@ -198,7 +201,7 @@ rglwidget()
 
 ### Fraction of NPCs in a cluster metric
 
-What I think we want is what fraction of total NPCs are in a cluster. Get total number of points with cluster not equal to 0 (meaning assigned to noise/no cluster by dbscan) in **dbscan$cluster** object.
+What I think we want is what fraction of total NPCs are in a cluster. Get  number of points with **cluster** not equal to 0 (meaning assigned to noise/no cluster by dbscan) in **dbscan$cluster** object. Divide this by total number of points to get fraction present in a cluster.
 
 ```{r}
 
@@ -219,12 +222,280 @@ print(paste0("WT: ", bar$frac))
 print(paste0("Nup132∆: ", foobar$frac))
 ```
 
+### Simulated dataset using `icosa`
+
+When simulations are done with `icosa` there is no variable to specify minimal point-point distance like there is in Jay's ImageJ plugin. To get around this, we can simulate the data and then filter out any that are below the minimal distance detectable using our track max not mask plugin for SIM data (160nm).
+
+```{r warning=FALSE, error=FALSE, message=FALSE}
+
+simulate_data <- function(points, radius, num) {
+  output <- list()
+  for (i in 1:num) {
+    x <- data.frame(icosa::rpsphere(n=points, radius=radius))
+    d <- as.matrix(dist(x))
+    d[d==0] <- NA
+    min.d <- rowMins(d, na.rm=TRUE)
+    x$min.dist <- min.d
+    xf <- x %>% filter(min.dist >= 0.16)
+    output[[i]] <- data_frame(xf)
+  }
+  return(output)
+}
+
+test <- simulate_data(150, 1.25, 100)
+
+NPC.dbscan <- function(x) {
+  d <- dbscan(x, eps=0.2, minPts=3)
+  return(d)
+}
+  
+testdb <- lapply(test, NPC.dbscan)
+test.clustfrac <- lapply(testdb, clust.frac)
+testfinal <- plyr::ldply(test.clustfrac)
+testfinal %>% summarise_all(list(mean=mean, StDev=sd))
+
+```
+
+
 ### Simulated with minimum distance threshold.
 
-One difference here is that there is no  minimum distance for points in `icosa` sphere simulations. For our purposes, we will simulate with ImageJ plugin the random points on a sphere with a minimum distance of 100 nm (based on approximate minimum distance for touching NPCs), and then run those simluations through the NPC tracking plugin with the same minimum distance threshold as is used for the 3D SIM data (160 nm min seperation). In this way, we will be comparing clustering observed in data acquired/analyzed the same way.
+The inability of the `icosa::rpsphere` function to specify minimum distances results in a lot of points being removed using the minimum distance filter as shown above (i.e., even though 150 points simulated, mean number after distance filtering was only ~80). Intead, lets try to simulate with ImageJ plugin the random points on a sphere with a minimum distance of 100 nm (based on approximate minimum distance for touching NPCs), and then run those simluations through the NPC tracking plugin with the same minimum distance threshold as is used for the 3D SIM data (160 nm min seperation). In this way, we will be comparing clustering observed in data acquired/analyzed the same way.
+
+Simulations were run one hundred times for a sphere with radius of 1200 nm and 125 points (based on mean values for Nsp1-GFP surface area and number of NPCs in mid to late G2 stage). The simulated images were than processed with track max not mask and the coordinates and pair correlation plots were saved.
+
+Let's read in the tracked coordinates and see how the data looks in terms of number of NPCs tracked vs. real (125).
+
+```{r}
+simG2.files <- list.files(pattern = "\\.xls$", path = "./data/simulated_data/", recursive = FALSE, full.names = TRUE) #make a list of all of the files to be analyzed. This will only include files ending in xls
+simG2.files <- mixedsort(simG2.files)
+simG2.data <- lapply(simG2.files, fread, select = c("x", "y", "z"))
+
+```
+
+
+```{r}
+NPC_pix2microns <-function(dataset) {
+  dataset %>% 
+    mutate(x = x*0.0400015,
+           y = y*0.0400015,
+           z = z*0.125)
+}
+
+#Function to calcualte an object's sphericity from user-defined volume and surface area values
+sphericity <- function(volume, area) {
+  (pi^(1/3) * (6*volume)^(2/3))/area
+}
+
+##Custom function to extract surface area from 3D convexhull with error handling. 
+surf.area <- function(x, cond="problem") {
+  out <- tryCatch(
+    {
+      convhulln(x, options="FA")$area
+    }, error = function(cond) {
+      message("Error with convex hull computation")
+      return(NA)
+    }, warning = function(cond) {
+      message("Warning during convex hull computation")
+      return(NA)
+    }
+  )
+  return(out)
+}
+
+##Custom function to extract volume from 3D convexhull with error handling. 
+volume <- function(x, cond="problem") {
+  out <- tryCatch(
+    {
+      convhulln(x, options="FA")$vol
+    }, error = function(cond) {
+      message("Error with convex hull computation")
+      return(NA)
+    }, warning = function(cond) {
+      message("Warning during convex hull computation")
+      return(NA)
+    }
+  )
+  return(out)
+}
+
+#Function to calculate surface area, volume, sphericity and number of NPCs for dataframe of x/y/z NPC coordinates. Returns as a data frame. Uses convhulln function from 'geometry' package.
+NPC.stats <-function(x) {
+  num.NPCs <- nrow(x)
+  SA <- surf.area(x)
+  VOL <- volume(x)
+  sphericity.x <- sphericity(VOL, SA)
+  density <- num.NPCs/SA
+  data.frame(SA, VOL, sphericity.x, num.NPCs, density)
+}
+
+#Function to optimize 3D convex hull for surface area and volume calculations. Allows removal of 10 percent of points to help detect and remove outliers from background.
+#Not sure how this handles datasets that throw convhull errors. Can try to replace convhulln calls with surf.area and volume functions but then not sure how it will handle NA values.
+hullopt <- function(data) {
+    input <- data
+    centroid <- data %>% 
+      summarise_all(mean)
+    #print(centroid)
+    input$dist2cent <- as.numeric(dist.xyz(as.matrix(input), as.matrix(centroid))) #dist.xyz has to have matrices as input
+    input <- input %>% arrange(desc(dist2cent))
+    rows <- nrow(input)
+    loop <- 1
+    
+    while (0.1*rows > loop) {
+        i <- loop+1
+        current <- input[loop:rows, ]
+        currenthull <- convhulln(current[,1:3])
+        currentrows <- nrow(current)
+        currentpct <- length(unique(c(currenthull)))/currentrows
+        currentSA <- convhulln(current[,1:3], options="FA")$area
+        currentV <- convhulln(current[,1:3], options="FA")$vol
+        currentsph <- sphericity(currentV, currentSA)
+        test <- input[i:rows, ]
+        testhull <- convhulln(test[,1:3])
+        testrows <- nrow(test)
+        testpct <- length(unique(c(testhull)))/testrows
+        testSA <- convhulln(test, options="FA")$area
+        testV <- convhulln(test, options="FA")$vol
+        testsph <- sphericity(currentV, currentSA)
+        
+        loop <- loop + 1
+        #print(paste(loop-1, currentpct, testpct, currentsph, testsph))
+        
+        if(testpct < currentpct) {
+            loop <- loop-1
+            break
+        }
+    }
+    
+    output <- input[loop:rows, 1:3]
+    optinfo <- loop-1
+    return(list("info" = optinfo, "output" = output))
+    
+}
+```
+
+
+```{r}
+
+names(simG2.data) <- gsub("\\.xls$", "", simG2.files) #remove the .xls from the names of the files
+simG2.convert <- lapply(simG2.data, NPC_pix2microns) #convert the coordinates from pixels into micron space using custom function 'NPC_pix2microns', in which pixel/slice size is provided
+simG2.convert <- lapply(simG2.convert, hullopt) #run converted x/y/z coordinates for NPCs through hull optimization function to remove any outlier spots prior to surface area/volume calculations.
+simG2.converted <-  map(simG2.convert, 2) #extract the dataframe objects containing filtered x/y/z data sets for NPC stats analysis later
+removed <- map(simG2.convert, 1) #make list of dbls containing number of points removed during hull optimization to be added to final results table later
+removed <- unlist(removed) #convert list to a dataframe so can cbind later
+simG2.results <- lapply(simG2.converted, NPC.stats) #calculate NPC number, NE surface area/volume, NPC density, sphericity using the custom 'NPC.stats' function on the data converted to microns
+simG2results.combined <- plyr::ldply(simG2.results, data.frame) #convert list of NPC stats to a single data frame with one row per file/image analyzed
+
+simG2results.combined %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
+```
+
+So, we see that only ~97 NPCs out of 125 simulated are returned after tracking in ImageJ. The true surface area is 18.1 square microns, and computed is 17.36. True density is 6.9 NPCs/micron squared, while observed density is 5.6 NPCs/micron squared. This represents ~19 percent of NPCs that are lost during analysis.
+
+Regardless of the loss of some NPCs, let's see how the fraction clustered looks in the simulated random data.
+
+```{r}
+
+simG2db <- lapply(simG2.converted, NPC.dbscan)
+simG2.clustfrac <- lapply(simG2db, clust.frac)
+simG2final <- plyr::ldply(simG2.clustfrac)
+simG2final %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
+
+```
+
+We see that on average, only 1% of simulated random NPCs are observed to be in clusters defined by epsilon value of 200nm radius and minimum number of points as 3.
 
 ### Test this in batch with real data sets.
 
-Let's see how the fraction of clustered NPCs metric behaves on large datasets.
+Let's see how the fraction of clustered NPCs metric behaves on 3D-SIM image datasets.
+
+#### Analysis of Wild-type Nsp1-GFP SIM data.
+
+```{r}
+wt.files <- list.files(pattern = "\\.xls$", path = "./data/wt_data/", recursive = FALSE, full.names = TRUE) #make a list of all of the files to be analyzed. This will only include files ending in xls
+wt.files <- mixedsort(wt.files)
+wt.data <- lapply(wt.files, fread, select = c("x", "y", "z"))
+names(wt.data) <- gsub("\\.xls$", "", wt.files) #remove the .xls from the names of the files
+wt.convert <- lapply(wt.data, NPC_pix2microns) #convert the coordinates from pixels into micron space using custom function 'NPC_pix2microns', in which pixel/slice size is provided
+wt.convert <- lapply(wt.convert, hullopt) #run converted x/y/z coordinates for NPCs through hull optimization function to remove any outlier spots prior to surface area/volume calculations.
+wt.converted <-  map(wt.convert, 2) #extract the dataframe objects containing filtered x/y/z data sets for NPC stats analysis later
+wt.removed <- map(wt.convert, 1) #make list of dbls containing number of points removed during hull optimization to be added to final results table later
+wt.removed <- unlist(wt.removed) #convert list to a dataframe so can cbind later
+wt.results <- lapply(wt.converted, NPC.stats) #calculate NPC number, NE surface area/volume, NPC density, sphericity using the custom 'NPC.stats' function on the data converted to microns
+wtresults.combined <- plyr::ldply(wt.results, data.frame) #convert list of NPC stats to a single data frame with one row per file/image analyzed
+wtresults.combined$Points.Removed <- wt.removed #add number of points removed column
+
+wtresults.combined %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
+
+wtdb <- lapply(wt.converted, NPC.dbscan)
+wt.clustfrac <- lapply(wtdb, clust.frac)
+wtfinal <- plyr::ldply(wt.clustfrac)
+wtfinal %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
+
+```
+
+We can see a few take away points:
+
+* On average, the NPC density is slightly lower than those seen in the simulated data.
+* The fraction of NPCs in clusters is 2.3 times higher than simulated random (2.3% vs 1%)
+
+#### Analysis of Nup132∆ Nsp1-mCh SIM data.
+
+```{r}
+mut.files <- list.files(pattern = "\\.xls$", path = "./data/mut_data/", recursive = FALSE, full.names = TRUE) #make a list of all of the files to be analyzed. This will only include files ending in xls
+mut.files <- mixedsort(mut.files)
+mut.data <- lapply(mut.files, fread, select = c("x", "y", "z"))
+names(mut.data) <- gsub("\\.xls$", "", mut.files) #remove the .xls from the names of the files
+mut.convert <- lapply(mut.data, NPC_pix2microns) #convert the coordinates from pixels into micron space using custom function 'NPC_pix2microns', in which pixel/slice size is provided
+mut.convert <- lapply(mut.convert, hullopt) #run converted x/y/z coordinates for NPCs through hull optimization function to remove any outlier spots prior to surface area/volume calculations.
+mut.converted <-  map(mut.convert, 2) #extract the dataframe objects containing filtered x/y/z data sets for NPC stats analysis later
+mut.removed <- map(mut.convert, 1) #make list of dbls containing number of points removed during hull optimization to be added to final results table later
+mut.removed <- unlist(mut.removed) #convert list to a dataframe so can cbind later
+mut.results <- lapply(mut.converted, NPC.stats) #calculate NPC number, NE surface area/volume, NPC density, sphericity using the custom 'NPC.stats' function on the data converted to microns
+mutresults.combined <- plyr::ldply(mut.results, data.frame) #convert list of NPC stats to a single data frame with one row per file/image analyzed
+mutresults.combined$Points.Removed <- mut.removed #add number of points removed column
+
+mutresults.combined %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
+
+mutdb <- lapply(mut.converted, NPC.dbscan)
+mut.clustfrac <- lapply(mutdb, clust.frac)
+mutfinal <- plyr::ldply(mut.clustfrac)
+mutfinal %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
+```
+
+* The major difference in this data set is that there are significantly fewer NPCs detected. This is likely an artifact of the clustering - if they are clustered close together, then the track max not mask will remove more than one NPC during the masking step.
+
+* The fraction of clustered NPCs increases to 3.4% of all NPCs. It is nice to see this increase, however the magnitude of clustering seems very small. Perhaps we should try to subset out nuclei from the Nup132∆ data sets that have clear, strong clustering and see how the fraction clustered looks in these? There were clearly a majority of nuclei that did not have strong clustering even when we used the proximity ratio/pair correlation function approach, so these could be weighing down the average for the whole data set.
 
 
+#### Comparison between datasets
+
+```{r}
+simG2final$Strain <- c("Random")
+wtfinal$Strain <- c("WT")
+mutfinal$Strain <- c("Nup132∆")
+
+ls <- list(simG2final, wtfinal, mutfinal)
+df <- do.call("rbind", ls)
+df <- df %>%
+  dplyr::rename(Fraction.Clustered = frac) %>% 
+  select(Fraction.Clustered, Strain)
+
+df$Strain <- factor(df$Strain, levels=c("Random", "WT", "Nup132∆"))
+
+df.melt <- reshape2::melt(df, value="Fraction.Clustered")
+
+comparisons <- list(c("Random", "WT"), c("Random", "Nup132∆"), c("WT", "Nup132∆"))
+
+
+ggplot(df, aes(x=Strain, y=Fraction.Clustered)) +
+  geom_sina() +
+  ylim(0,0.3) +
+  ggpubr::stat_compare_means(method="anova", label.y=0.27) +
+  ggpubr::stat_compare_means(comparisons = list(c("Random", "WT"), c("Random", "Nup132∆"), c("WT", "Nup132∆")), method = "t.test", label.y = c(.15, .2, .25)) +
+  theme_cowplot()
+
+```
+
+
+### Conclusion
+
+The DBSCAN analysis seems to work and is easily added into the analysis workflow. Will go ahead and move forward with getting this worked in, keeping the proximity ratio measurements from the pair correlation functions so we can compare those two methods for looking at clustering.
