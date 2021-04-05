@@ -1,0 +1,230 @@
+---
+title: "Clustering_analysis_with_dbscan"
+author: "JMV"
+date: "4/2/2021"
+output: html_document
+  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(data.table)
+library(tidyverse)
+library(cowplot)
+library(icosa)
+library(rgl)
+library(bio3d)
+library(geometry)
+library(ggplot2)
+library(summarytools)
+```
+
+### Background
+
+We have acquired three-dimensional structured illumination microscopy images of nuclear pore complexes. The individual NPCs are segmented and their locations (x/y/z) are extracted using ImageJ plugins/macros. From this data, we want to:
+
+* Visualize/display the points in three dimensions along with their reconstructed surface
+* Determine whether the distribution of the points is different between different strains or treatment conditions.
+
+In a separate R analysis workflow, we have developed a pipeline to reconstruct the surface by computing the 3D convex hull of the point cloud. This step also allows for optimization of the hull to remove outlier points. Once the optimization is complete, we want to quantitatively assess the distribution of the optimized point cloud. We are particularly interested in the extent of clustering of points, and whether certain conditions display more clustering than others. We will compare the clustering observed in our datasets to similar metrics from simulated data representing complete spatial randomness on the surface of a sphere.
+
+### Example data
+
+Here are maximum intensity projections for a wild-type nucleus, and a representative nucleus from Nup132∆ background that displays increased clustering.
+
+```{r, fig.cap="Nsp1-GFP WT", out.width="50%", fig.alignt="center", echo=FALSE}
+knitr::include_graphics("./data/MAX_Nsp1-GFP_Ppc89-mCherry_02_visit_1_SIR_nuc5-3.tif")
+
+```
+
+```{r, fig.cap="Nsp1-mCh Nup132∆", out.width="50%", fig.alignt="center", echo=FALSE}
+knitr::include_graphics("./data/MAX_Nsp1mch_deltaNup132cl10_07_visit_2_SIR_nuc15-2.tif")
+
+```
+
+For simulated random data, we can simulate points on a sphere using the `icosa` package:
+```{r }
+simulated <- data.frame(icosa::rpsphere(131, radius=1.2))
+
+```
+
+Then we can plot these points and visualize them with their reconstructed 3D convex hull surface:
+
+```{r echo=FALSE}
+## convexhull of points and visualization
+NPC.plot <- function(sim, alpha = 0.4, ...) {
+    sim <- as.data.frame(sim)
+    x <- sim$x
+    y <- sim$y
+    z <- sim$z
+    plot3d(x, y, z, col="blue", box = FALSE,
+           type ="p", size = 5, aspect = "iso", axes = FALSE)
+    ts.surf1 <- t(convhulln(sim))  # see the qhull documentations for the options
+    convex1 <-  rgl.triangles(sim[ts.surf1,1],sim[ts.surf1,2],sim[ts.surf1,3],col="gold2",alpha= alpha)
+}
+NPC.plot(simulated)
+rglwidget()
+```
+
+For comparison, we can do the same plots for the points extracted from the WT and Nup132∆ images.
+
+```{r}
+#read in the datasets selecting the xyz coordinate columns
+wt <- fread("./data/Nsp1-GFP_Ppc89-mCherry_02_visit_1_SIR_nuc5.xls", select=c("x", "y", "z"))
+mut <- fread("./data/Nsp1mch_deltaNup132cl10_07_visit_2_SIR_nuc15.xls", select=c("x", "y", "z"))
+
+#convert the data into micron space
+NPC_pix2microns <-function(dataset) {
+  dataset %>% 
+    mutate(x = x*0.0400015,
+           y = y*0.0400015,
+           z = z*0.125)
+}
+
+wt <- NPC_pix2microns(wt)
+mut <- NPC_pix2microns(mut)
+
+NPC.plot(wt)
+rglwidget()
+NPC.plot(mut)
+rglwidget()
+
+```
+
+
+### Clustering analysis
+
+Now, we want to analyze these data sets using DBSCAN. First, load in the required package.
+
+```{r message=FALSE, warning=FALSE, error=FALSE}
+library(dbscan)
+```
+
+Analysis of points using DBSCAN requires user input of two values: *eps*, or epsilon, which is the distance threshold which two points must be within to be classified as directly density-reachable, or in the same neighborhood; and *minPts*, which is the minimum number of points that a neighborhood must contain to be considered a cluster. The value of *eps* is user defined, while the value of *minPts* is typically set as the number of dimensions in your dataset plus 1 (so, minPts=4 for 3D point clouds).
+
+For defining the value for *eps*, a common approach is to plot the points' *k*th nearest neighbor distances in decreasing order and look for a "knee" in the plot. This is accomplished using the function `kNNdistplot` in the `dbscan` package:
+
+```{r}
+#the default minPts value is used for 'k'
+kNNdistplot(simulated, k=4)
+kNNdistplot(wt, k=4)
+kNNdistplot(mut, k=4)
+```
+
+We see that the values for "knees" in the 4-NN distances are variable between simulated, WT and mutant data sets. We will use some knowledge of our imaging and analysis approaches, as well as the known size of the NPCs to define a distance that we would consider NPCs to be clustered.
+
+The resolution of our imaging approach is larger than the actual diameter of the yeast NPC (~100nm), and our track max not mask is performed with a minimum distance between points of 160nm. In vivo, the smallest distance between two NPCs would be 100 nm. So, for starters, let's say that we define a cluster of NPCs as at least 3 NPCs with a minimum *eps* distance value of 200 nm. Let's see what that looks like.
+
+```{r}
+clust.plot <- function(sim, dbclust, alpha = 0.2, main=NULL, ...) {
+    sim <- as.data.frame(sim)
+    x <- sim$x
+    y <- sim$y
+    z <- sim$z
+    plot3d(x, y, z, col=dbclust$cluster+1L, box = FALSE,
+           type ="p", size = 6, aspect = "iso", axes = FALSE, main=main, sub=paste0("Clusters: ", max(dbclust$cluster)))
+    ts.surf1 <- t(convhulln(sim))  # see the qhull documentations for the options
+    convex1 <-  rgl.triangles(sim[ts.surf1,1],sim[ts.surf1,2],sim[ts.surf1,3],col="grey",alpha= alpha)
+}
+```
+
+
+```{r}
+#run clustering analysis with dbscan, eps = 0.2, minPts=3
+sim <- dbscan(simulated, eps=0.2, minPts=3)
+wtdb <- dbscan(wt, eps=0.2, minPts=3)
+mutdb <- dbscan(mut, eps=0.2, minPts=3)
+
+sim
+clust.plot(simulated, sim)
+rglwidget()
+
+wtdb
+clust.plot(wt, wtdb)
+rglwidget()
+
+mutdb
+clust.plot(mut, mutdb)
+rglwidget()
+
+
+```
+
+Let's see how things change if we use the DBSCAN* settings, which says that border points (i.e., the point is not a **core** point, with at least *minPts* within *eps*, but is within *eps* of N-number points with N < minPts).
+
+```{r}
+simbp <- dbscan(simulated, eps=0.2, minPts=3, borderPoints=FALSE)
+wtdbbp <- dbscan(wt, eps=0.2, minPts=3, borderPoints=FALSE)
+mutdbbp <- dbscan(mut, eps=0.2, minPts=3, borderPoints=FALSE)
+
+simbp
+clust.plot(simulated, simbp)
+rglwidget()
+
+wtdbbp
+clust.plot(wt, wtdbbp)
+rglwidget()
+
+mutdbbp
+clust.plot(mut, mutdbbp)
+rglwidget()
+rgl.close()
+```
+
+Excluding border points does not seem to provide any meaningful improvement in our analsis.
+
+We see that the number of clusters detected is higher for simulated and wild-type data. The Nup132∆ mutant that is known to have clustered NPCs actually has fewer clusters ID'd. This suggests that the metric used to compare extent of clustering is not actually cluster number. Perhaps the fraction of NPCs in a cluster per nucleus is a meaningful metric. There is also a clear density-dependence even for randomly spaced NPCs - for example, at higher densities, there are more likely to be points within the *eps* radius and even if all of the points in that "cluster" are evenly spaced then it will be a larger cluster. Let's see how this works with more simulated data.
+
+```{r}
+#simulate same size sphere with 2x the number of points of earlier simulated data
+sim2x <- icosa::rpsphere(n=250, radius=1.2)
+sim2xdb <- dbscan(sim2x, eps=0.2, minPts=3)
+
+#original
+sim
+print(paste0("Number of Clusters: ", max(sim$cluster)))
+
+#doubled density
+sim2xdb
+print(paste0("Number of Clusters: ", max(sim2xdb$cluster)))
+
+mfrow3d(nr=1, nc=2, sharedMouse=TRUE)
+clust.plot(simulated, sim, main="131 points")
+clust.plot(sim2x, sim2xdb, main="250 points")
+rglwidget()
+
+```
+
+### Fraction of NPCs in a cluster metric
+
+What I think we want is what fraction of total NPCs are in a cluster. Get total number of points with cluster not equal to 0 (meaning assigned to noise/no cluster by dbscan) in **dbscan$cluster** object.
+
+```{r}
+
+clust.frac <- function(x) {
+  c <- as.vector(x$cluster)
+  total <- length(c)
+  clustd <- length(c[c>0])
+  frac <- clustd/total
+  data.frame(total, clustd, frac)
+}
+
+foo <- clust.frac(sim)
+bar <- clust.frac(wtdb)
+foobar <- clust.frac(mutdb)
+
+print(paste0("Simulated Random: ", foo$frac))
+print(paste0("WT: ", bar$frac))
+print(paste0("Nup132∆: ", foobar$frac))
+```
+
+### Simulated with minimum distance threshold.
+
+One difference here is that there is no  minimum distance for points in `icosa` sphere simulations. For our purposes, we will simulate with ImageJ plugin the random points on a sphere with a minimum distance of 100 nm (based on approximate minimum distance for touching NPCs), and then run those simluations through the NPC tracking plugin with the same minimum distance threshold as is used for the 3D SIM data (160 nm min seperation). In this way, we will be comparing clustering observed in data acquired/analyzed the same way.
+
+### Test this in batch with real data sets.
+
+Let's see how the fraction of clustered NPCs metric behaves on large datasets.
+
+
