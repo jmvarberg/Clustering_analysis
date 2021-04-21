@@ -156,6 +156,79 @@ rglwidget()
 
 ```
 
+Now let's try 225, 250, 275 and 300 epsilon values for comparison.
+```{r}
+#run clustering analysis with dbscan, eps = 0.2, minPts=3
+sim <- dbscan(simulated, eps=0.225, minPts=3)
+wtdb <- dbscan(wt, eps=0.225, minPts=3)
+mutdb <- dbscan(mut, eps=0.225, minPts=3)
+
+sim
+clust.plot(simulated, sim)
+rglwidget()
+
+wtdb
+clust.plot(wt, wtdb)
+rglwidget()
+
+mutdb
+clust.plot(mut, mutdb)
+rglwidget()
+
+#run clustering analysis with dbscan, eps = 0.2, minPts=3
+sim <- dbscan(simulated, eps=0.25, minPts=3)
+wtdb <- dbscan(wt, eps=0.25, minPts=3)
+mutdb <- dbscan(mut, eps=0.25, minPts=3)
+
+sim
+clust.plot(simulated, sim)
+rglwidget()
+
+wtdb
+clust.plot(wt, wtdb)
+rglwidget()
+
+mutdb
+clust.plot(mut, mutdb)
+rglwidget()
+
+#run clustering analysis with dbscan, eps = 0.2, minPts=3
+sim <- dbscan(simulated, eps=0.275, minPts=3)
+wtdb <- dbscan(wt, eps=0.275, minPts=3)
+mutdb <- dbscan(mut, eps=0.275, minPts=3)
+
+sim
+clust.plot(simulated, sim)
+rglwidget()
+
+wtdb
+clust.plot(wt, wtdb)
+rglwidget()
+
+mutdb
+clust.plot(mut, mutdb)
+rglwidget()
+
+#run clustering analysis with dbscan, eps = 0.2, minPts=3
+sim <- dbscan(simulated, eps=0.3, minPts=3)
+wtdb <- dbscan(wt, eps=0.3, minPts=3)
+mutdb <- dbscan(mut, eps=0.3, minPts=3)
+
+sim
+clust.plot(simulated, sim)
+rglwidget()
+
+wtdb
+clust.plot(wt, wtdb)
+rglwidget()
+
+mutdb
+clust.plot(mut, mutdb)
+rglwidget()
+```
+
+Even just the increase from 200 to 225 results in a majority of WT NPCs being considered to be present in a cluster. Visually, the clusters seen in the Nup132∆ nucleus look better at 250 epsilon though. We should compare the output for 200, 225, and 250 nm epsilon values for simulated random datasets and see how things look before choosing which value to apply for all our analyses.
+
 Let's see how things change if we use the DBSCAN* settings, which says that border points (i.e., the point is not a **core** point, with at least *minPts* within *eps*, but is within *eps* of N-number points with N < minPts).
 
 ```{r}
@@ -246,12 +319,12 @@ simulate_data <- function(points, radius, num) {
 
 test <- simulate_data(150, 1.25, 100)
 
-NPC.dbscan <- function(x) {
-  d <- dbscan(x, eps=0.2, minPts=3)
+NPC.dbscan <- function(x, eps) {
+  d <- dbscan(x, eps=eps, minPts=3)
   return(d)
 }
   
-testdb <- lapply(test, NPC.dbscan)
+testdb <- lapply(test, NPC.dbscan, eps=0.2)
 test.clustfrac <- lapply(testdb, clust.frac)
 testfinal <- plyr::ldply(test.clustfrac)
 testfinal %>% summarise_all(list(mean=mean, StDev=sd))
@@ -396,7 +469,7 @@ Regardless of the loss of some NPCs, let's see how the fraction clustered looks 
 
 ```{r}
 
-simG2db <- lapply(simG2.converted, NPC.dbscan)
+simG2db <- lapply(simG2.converted, NPC.dbscan, eps=0.2)
 simG2.clustfrac <- lapply(simG2db, clust.frac)
 simG2final <- plyr::ldply(simG2.clustfrac)
 simG2final %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
@@ -404,6 +477,28 @@ simG2final %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
 ```
 
 We see that on average, only 1% of simulated random NPCs are observed to be in clusters defined by epsilon value of 200nm radius and minimum number of points as 3.
+
+Compare with 225, 250, 275 epsilon values.
+
+```{r}
+
+simG2db <- lapply(simG2.converted, NPC.dbscan, eps=0.225)
+simG2.clustfrac <- lapply(simG2db, clust.frac)
+simG2final <- plyr::ldply(simG2.clustfrac)
+simG2final %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
+
+simG2db <- lapply(simG2.converted, NPC.dbscan, eps=0.25)
+simG2.clustfrac <- lapply(simG2db, clust.frac)
+simG2final <- plyr::ldply(simG2.clustfrac)
+simG2final %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
+
+simG2db <- lapply(simG2.converted, NPC.dbscan, eps=0.275)
+simG2.clustfrac <- lapply(simG2db, clust.frac)
+simG2final <- plyr::ldply(simG2.clustfrac)
+simG2final %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
+
+```
+
 
 ### Test this in batch with real data sets.
 
@@ -491,8 +586,8 @@ comparisons <- list(c("Random", "WT"), c("Random", "Nup132∆"), c("WT", "Nup132
 ggplot(df, aes(x=Strain, y=Fraction.Clustered)) +
   geom_sina() +
   ylim(0,0.3) +
-  ggpubr::stat_compare_means(method="anova", label.y=0.27) +
-  ggpubr::stat_compare_means(comparisons = list(c("Random", "WT"), c("Random", "Nup132∆"), c("WT", "Nup132∆")), method = "t.test", label.y = c(.15, .2, .25)) +
+  ggpubr::stat_compare_means(method="kruskal.test", label.y=0.27) +
+  ggpubr::stat_compare_means(comparisons = list(c("Random", "WT"), c("Random", "Nup132∆"), c("WT", "Nup132∆")), method = "wilcox.test", paired=FALSE, label.y = c(.15, .2, .25)) +
   theme_cowplot()
 
 ```
