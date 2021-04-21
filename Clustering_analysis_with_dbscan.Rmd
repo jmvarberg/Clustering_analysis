@@ -497,6 +497,12 @@ simG2.clustfrac <- lapply(simG2db, clust.frac)
 simG2final <- plyr::ldply(simG2.clustfrac)
 simG2final %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
 
+#back to 0.2 for final comparison
+simG2db <- lapply(simG2.converted, NPC.dbscan, eps=0.2)
+simG2.clustfrac <- lapply(simG2db, clust.frac)
+simG2final <- plyr::ldply(simG2.clustfrac)
+
+
 ```
 
 
@@ -522,7 +528,7 @@ wtresults.combined$Points.Removed <- wt.removed #add number of points removed co
 
 wtresults.combined %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
 
-wtdb <- lapply(wt.converted, NPC.dbscan)
+wtdb <- lapply(wt.converted, NPC.dbscan, eps=0.2)
 wt.clustfrac <- lapply(wtdb, clust.frac)
 wtfinal <- plyr::ldply(wt.clustfrac)
 wtfinal %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
@@ -552,7 +558,7 @@ mutresults.combined$Points.Removed <- mut.removed #add number of points removed 
 
 mutresults.combined %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
 
-mutdb <- lapply(mut.converted, NPC.dbscan)
+mutdb <- lapply(mut.converted, NPC.dbscan, eps=0.2)
 mut.clustfrac <- lapply(mutdb, clust.frac)
 mutfinal <- plyr::ldply(mut.clustfrac)
 mutfinal %>% summarise_if(is.numeric, mean, na.rm = TRUE) %>% kable(.)
@@ -596,3 +602,19 @@ ggplot(df, aes(x=Strain, y=Fraction.Clustered)) +
 ### Conclusion
 
 The DBSCAN analysis seems to work and is easily added into the analysis workflow. Will go ahead and move forward with getting this worked in, keeping the proximity ratio measurements from the pair correlation functions so we can compare those two methods for looking at clustering.
+
+
+### Comparison of fraction of nuclei with at least one cluster.
+
+```{r}
+
+df.melt %>% 
+  mutate(Clustered = case_when(value == 0 ~ "No",
+                               value != 0 ~ "Yes")) %>% 
+  group_by(Strain, Clustered) %>% 
+  add_tally() %>%
+  summarise_at(.vars=c("n"), mean)
+  
+
+```
+
